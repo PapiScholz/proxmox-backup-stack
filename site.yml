@@ -1,0 +1,56 @@
+---
+# Stack de backups Proxmox: datastore PBS sobre NFS -> storage pbs en el
+# cluster -> backup job --all -> CT watchdog con dashboard.
+#
+# Un play por rol a proposito: cada rol corre solo en su nodo con
+# `meta: end_host`, que termina el host para todo el play. Con los roles en un
+# solo play, el primero cortaria a los nodos que necesitan los siguientes.
+#
+#   ansible-playbook site.yml                       # todo
+#   ansible-playbook site.yml --tags dashboard      # una capa
+#   ansible-playbook site.yml --check --diff        # simular sin aplicar
+
+- name: Validar inventario y variables
+  hosts: pve_nodes
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Los nodos de cada rol tienen que estar en pve_nodes
+      ansible.builtin.assert:
+        that:
+          - pbs_host_node in groups['pve_nodes']
+          - dashboard_node in groups['pve_nodes']
+        fail_msg: >-
+          pbs_host_node ({{ pbs_host_node }}) y dashboard_node
+          ({{ dashboard_node }}) tienen que ser nombres del grupo [pve_nodes]
+          del inventario.
+        quiet: true
+      run_once: true
+
+- name: Datastore PBS sobre NFS
+  hosts: pve_nodes
+  gather_facts: false
+  tags: [datastore]
+  roles:
+    - pbs_datastore_nas
+
+- name: Storage PBS en el cluster
+  hosts: pve_nodes
+  gather_facts: false
+  tags: [storage]
+  roles:
+    - pve_pbs_storage
+
+- name: Backup job vzdump --all
+  hosts: pve_nodes
+  gather_facts: false
+  tags: [job]
+  roles:
+    - pve_backup_job
+
+- name: Dashboard watchdog de backups
+  hosts: pve_nodes
+  gather_facts: false
+  tags: [dashboard]
+  roles:
+    - backup_dashboard

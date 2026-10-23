@@ -1,0 +1,12 @@
+[Unit]
+Description=Regenera el dashboard de backups Proxmox
+
+[Timer]
+OnBootSec=1min
+# Frecuencia por defecto. El rol/bootstrap la cambia con un drop-in
+# (backup-dashboard.timer.d/interval.conf) segun REFRESH_MINUTES.
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

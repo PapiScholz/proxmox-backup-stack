@@ -1,0 +1,29 @@
+# Config real del usuario — NUNCA al repo publico
+inventory.ini
+group_vars/all.yml
+dashboard.env
+*.env
+*.vault
+vault.yml
+vault-password.txt
+
+# Ansible
+*.retry
+collections/
+
+# Python
+__pycache__/
+*.pyc
+
+# Notas de trabajo personales (no son docs del proyecto)
+HANDOFF.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secretos genericos y editores
+.env
+.vscode/*
+!.vscode/extensions.json
+.idea/

@@ -1,0 +1,16 @@
+---
+- name: Recargar dashboard
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ dashboard_ct_id }}"
+      - --
+      - sh
+      - -c
+      - >-
+        systemctl daemon-reload
+        && systemctl enable --now nginx backup-dashboard.timer
+        && systemctl restart backup-dashboard.timer
+        && systemctl start backup-dashboard.service
+  changed_when: true

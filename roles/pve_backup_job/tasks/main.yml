@@ -1,0 +1,96 @@
+---
+# Backup job vzdump --all hacia el storage PBS.
+#
+# La retencion la hace el PBS (prune job del rol pbs_datastore_nas): el job de
+# PVE va con prune-backups keep-all=1 para que PVE no borre nada por su cuenta.
+#
+# /cluster/backup es de todo el cluster: alcanza con correrlo en un nodo.
+
+- name: Correr en un solo nodo
+  ansible.builtin.meta: end_host
+  when: inventory_hostname != pbs_host_node
+
+- name: Leer backup jobs del cluster
+  check_mode: false
+  ansible.builtin.command:
+    cmd: pvesh get /cluster/backup --output-format json
+  register: _pve_jobs
+  changed_when: false
+
+- name: Calcular estado deseado y actual
+  ansible.builtin.set_fact:
+    _pve_job: >-
+      {{ _pve_jobs.stdout | from_json
+         | selectattr('id', 'equalto', pve_backup_job_id) | first | default({}) }}
+    # Otro job --all hacia el mismo storage = duplicaria los backups.
+    _pve_job_twins: >-
+      {{ _pve_jobs.stdout | from_json
+         | rejectattr('id', 'equalto', pve_backup_job_id)
+         | selectattr('storage', 'defined') | selectattr('storage', 'equalto', pve_pbs_storage_name)
+         | selectattr('all', 'defined') | selectattr('all', 'equalto', 1)
+         | map(attribute='id') | list }}
+    _pve_job_exclude: "{{ pve_backup_exclude | map('string') | sort | join(',') }}"
+
+- name: No duplicar un job --all existente hacia el mismo storage
+  ansible.builtin.assert:
+    that: _pve_job_twins | length == 0
+    fail_msg: >-
+      Ya existe un job --all hacia {{ pve_pbs_storage_name }} con id
+      {{ _pve_job_twins | join(', ') }}. Para que este rol lo administre, pone
+      pve_backup_job_id: {{ _pve_job_twins | first | default('') }} en group_vars/all.yml.
+    quiet: true
+
+- name: Calcular argumentos del job
+  ansible.builtin.set_fact:
+    _pve_job_args:
+      - --schedule
+      - "{{ pve_backup_schedule }}"
+      - --storage
+      - "{{ pve_pbs_storage_name }}"
+      - --mode
+      - "{{ pve_backup_mode }}"
+      - --all
+      - "1"
+      - --enabled
+      - "1"
+      - --prune-backups
+      - keep-all=1
+      - --notification-mode
+      - "{{ pve_backup_notification_mode }}"
+      - --notes-template
+      - "{{ pve_backup_notes_template }}"
+
+- name: Crear el backup job
+  ansible.builtin.command:
+    argv: >-
+      {{ ['pvesh', 'create', '/cluster/backup', '--id', pve_backup_job_id] + _pve_job_args
+         + (['--exclude', _pve_job_exclude] if _pve_job_exclude | length > 0 else []) }}
+  when: _pve_job == {}
+  changed_when: true
+
+# Los campos en su default no aparecen en el GET (notification-mode=auto,
+# enabled=1): se normalizan antes de comparar para no dar changed siempre.
+- name: Comparar el job existente
+  ansible.builtin.set_fact:
+    _pve_job_differs: >-
+      {{ _pve_job.schedule | default('') != pve_backup_schedule
+         or _pve_job.storage | default('') != pve_pbs_storage_name
+         or _pve_job.mode | default('snapshot') != pve_backup_mode
+         or (_pve_job.all | default(0) | int) != 1
+         or (_pve_job.enabled | default(1) | int) != 1
+         or (_pve_job['prune-backups'] | default({})) != {'keep-all': 1}
+         or _pve_job['notification-mode'] | default('auto') != pve_backup_notification_mode
+         or _pve_job['notes-template'] | default('') != pve_backup_notes_template
+         or (_pve_job.exclude | default('', true) | string).split(',') | map('trim') | select | sort | join(',') != _pve_job_exclude }}
+  when: _pve_job != {}
+
+- name: Actualizar el backup job si difiere
+  ansible.builtin.command:
+    argv: >-
+      {{ ['pvesh', 'set', '/cluster/backup/' ~ pve_backup_job_id] + _pve_job_args
+         + (['--exclude', _pve_job_exclude] if _pve_job_exclude | length > 0
+            else (['--delete', 'exclude'] if _pve_job.exclude is defined else [])) }}
+  when:
+    - _pve_job != {}
+    - _pve_job_differs | bool
+  changed_when: true

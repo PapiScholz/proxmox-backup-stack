@@ -1,0 +1,276 @@
+---
+# Datastore del PBS sobre el NFS del NAS.
+#
+# Corre en el nodo PVE que aloja el CT del PBS (pbs_host_node): monta el NFS en
+# el host, lo bind-mountea al CT unprivileged y crea el datastore y sus jobs con
+# `pct exec <id> -- proxmox-backup-manager`, sin SSH ni token hacia el PBS.
+#
+# Un CT unprivileged no puede montar NFS adentro (EPERM aunque tenga
+# features: mount=nfs), por eso el mount vive en el host.
+
+- name: Correr solo en el nodo que aloja el PBS
+  ansible.builtin.meta: end_host
+  when: inventory_hostname != pbs_host_node
+
+- name: Calcular rutas y comando del PBS
+  ansible.builtin.set_fact:
+    _pbs_mgr: "pct exec {{ pbs_ct_id }} -- proxmox-backup-manager"
+    _pbs_host_uid: "{{ pbs_idmap_offset | int + pbs_backup_uid | int }}"
+    _pbs_host_gid: "{{ pbs_idmap_offset | int + pbs_backup_gid | int }}"
+    _pbs_datastore_host_path: "{{ nas_mount_point ~ pbs_datastore_path[pbs_ct_mount_point | length:] }}"
+    _pbs_mp_key: "mp{{ pbs_ct_mp_index }}"
+    _pbs_mp_value: "{{ nas_mount_point }},mp={{ pbs_ct_mount_point }}"
+
+- name: Validar que el datastore quede dentro del bind-mount
+  ansible.builtin.assert:
+    that:
+      - pbs_datastore_path == pbs_ct_mount_point or pbs_datastore_path.startswith(pbs_ct_mount_point ~ '/')
+    fail_msg: >-
+      pbs_datastore_path ({{ pbs_datastore_path }}) tiene que ser
+      pbs_ct_mount_point ({{ pbs_ct_mount_point }}) o estar debajo.
+    quiet: true
+
+- name: Verificar que el CT del PBS existe y esta corriendo
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "pct status {{ pbs_ct_id }}"
+  register: _pbs_ct_status
+  changed_when: false
+  failed_when: "_pbs_ct_status.rc != 0 or 'running' not in _pbs_ct_status.stdout"
+
+# --- NFS en el host ----------------------------------------------------------
+
+- name: Instalar cliente NFS en el host
+  ansible.builtin.apt:
+    name: nfs-common
+    state: present
+
+- name: Declarar el NFS en fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '^\S+\s+{{ nas_mount_point | regex_escape }}\s'
+    line: "{{ nas_nfs_server }}:{{ nas_nfs_export }} {{ nas_mount_point }} nfs {{ nas_mount_opts }} 0 0"
+    mode: "0644"
+  register: _pbs_fstab
+
+- name: Ver si el NFS ya esta montado
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "findmnt -n -o SOURCE {{ nas_mount_point }}"
+  register: _pbs_nfs_mounted
+  changed_when: false
+  failed_when: false
+
+# Solo si no esta montado: una vez montado, ese path es la raiz del NFS (que
+# puede ser el datastore mismo) y su modo lo maneja la tarea del datastore.
+- name: Crear punto de montaje del NFS
+  ansible.builtin.file:
+    path: "{{ nas_mount_point }}"
+    state: directory
+    mode: "0755"
+  when: _pbs_nfs_mounted.rc != 0
+
+# ansible.posix.mount agregaria una coleccion; fstab ya lo maneja lineinfile.
+- name: Montar el NFS
+  ansible.builtin.command:  # noqa: command-instead-of-module
+    cmd: "mount {{ nas_mount_point }}"
+  when: _pbs_nfs_mounted.rc != 0
+  changed_when: true
+
+- name: Avisar si fstab cambio con el NFS ya montado
+  ansible.builtin.debug:
+    msg: >-
+      fstab cambio pero {{ nas_mount_point }} ya estaba montado: las opciones
+      nuevas aplican en el proximo remount o reinicio del host.
+  when: _pbs_fstab is changed and _pbs_nfs_mounted.rc == 0
+
+- name: Crear el directorio del datastore con el uid mapeado del usuario backup
+  ansible.builtin.file:
+    path: "{{ _pbs_datastore_host_path }}"
+    state: directory
+    owner: "{{ _pbs_host_uid }}"
+    group: "{{ _pbs_host_gid }}"
+    mode: "{{ pbs_datastore_dir_mode }}"
+
+# --- Bind-mount al CT --------------------------------------------------------
+
+- name: Leer config del CT del PBS
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "pct config {{ pbs_ct_id }}"
+  register: _pbs_ct_config
+  changed_when: false
+
+- name: Extraer el mount point actual
+  ansible.builtin.set_fact:
+    _pbs_mp_current: >-
+      {{ (_pbs_ct_config.stdout_lines
+          | select('match', '^' ~ _pbs_mp_key ~ ': ')
+          | first | default('')).split(': ', 1) | last }}
+
+- name: No pisar un mount point existente con otro destino
+  ansible.builtin.assert:
+    that:
+      - _pbs_mp_current == '' or _pbs_mp_current.startswith(_pbs_mp_value)
+    fail_msg: >-
+      El CT {{ pbs_ct_id }} ya tiene {{ _pbs_mp_key }}: {{ _pbs_mp_current }}.
+      Elegi otro pbs_ct_mp_index o ajusta nas_mount_point/pbs_ct_mount_point.
+    quiet: true
+
+- name: Agregar el bind-mount al CT
+  ansible.builtin.command:
+    cmd: "pct set {{ pbs_ct_id }} -{{ _pbs_mp_key }} {{ _pbs_mp_value }}"
+  when: _pbs_mp_current == ''
+  changed_when: true
+
+- name: Ver si el bind-mount esta activo dentro del CT
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "pct exec {{ pbs_ct_id }} -- findmnt -n {{ pbs_ct_mount_point }}"
+  register: _pbs_mp_live
+  changed_when: false
+  failed_when: false
+
+- name: Fallar si el bind-mount necesita reinicio y no esta permitido
+  ansible.builtin.fail:
+    msg: >-
+      El bind-mount quedo configurado pero no esta activo dentro del CT
+      {{ pbs_ct_id }}. Reinicialo a mano (pct reboot {{ pbs_ct_id }}) o corre
+      con -e pbs_allow_ct_restart=true.
+  when: _pbs_mp_live.rc != 0 and not pbs_allow_ct_restart | bool
+
+- name: Pedir reinicio del CT del PBS
+  ansible.builtin.debug:
+    msg: "El bind-mount necesita reiniciar el CT {{ pbs_ct_id }}."
+  when: _pbs_mp_live.rc != 0
+  changed_when: true
+  notify: Reiniciar CT del PBS
+
+- name: Aplicar el reinicio pendiente
+  ansible.builtin.meta: flush_handlers
+
+# --- Datastore ---------------------------------------------------------------
+
+- name: Listar datastores
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} datastore list --output-format json"
+  register: _pbs_ds_list
+  changed_when: false
+
+- name: Crear el datastore (lento sobre NFS)
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} datastore create {{ pbs_datastore }} {{ pbs_datastore_path }} --gc-schedule '{{ pbs_gc_schedule }}'"
+  when: pbs_datastore not in (_pbs_ds_list.stdout | from_json | map(attribute='name') | list)
+  async: "{{ pbs_datastore_create_timeout }}"
+  poll: 30
+  changed_when: true
+
+- name: Leer config del datastore
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} datastore show {{ pbs_datastore }} --output-format json"
+  register: _pbs_ds_show
+  changed_when: false
+
+- name: Ajustar el schedule de garbage collection
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} datastore update {{ pbs_datastore }} --gc-schedule '{{ pbs_gc_schedule }}'"
+  when: (_pbs_ds_show.stdout | from_json).get('gc-schedule', '') != pbs_gc_schedule
+  changed_when: true
+
+# --- Prune job (retencion) ---------------------------------------------------
+
+- name: Listar prune jobs
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} prune-job list --output-format json"
+  register: _pbs_prune_list
+  changed_when: false
+
+- name: Calcular estado deseado y actual del prune job
+  ansible.builtin.set_fact:
+    # keep-* en 0 = no se usa (el PBS no acepta 0, se omite o se borra).
+    _pbs_prune_keep: >-
+      {{ {'keep-last': pbs_keep_last | int, 'keep-hourly': pbs_keep_hourly | int,
+          'keep-daily': pbs_keep_daily | int, 'keep-weekly': pbs_keep_weekly | int,
+          'keep-monthly': pbs_keep_monthly | int, 'keep-yearly': pbs_keep_yearly | int}
+         | dict2items | selectattr('value', 'gt', 0) | items2dict }}
+    _pbs_prune_current: >-
+      {{ _pbs_prune_list.stdout | from_json
+         | selectattr('id', 'equalto', pbs_prune_job_id) | first | default({}) }}
+
+- name: Calcular diferencias del prune job
+  ansible.builtin.set_fact:
+    # store no se compara: el id del job deriva del store y update no lo acepta.
+    _pbs_prune_desired: "{{ _pbs_prune_keep | combine({'schedule': pbs_prune_schedule}) }}"
+    _pbs_prune_actual: >-
+      {{ _pbs_prune_current | dict2items
+         | selectattr('key', 'in', ['schedule', 'keep-last', 'keep-hourly', 'keep-daily',
+                                    'keep-weekly', 'keep-monthly', 'keep-yearly'])
+         | items2dict }}
+    _pbs_prune_args: >-
+      --schedule '{{ pbs_prune_schedule }}'
+      {% for k, v in _pbs_prune_keep.items() %}--{{ k }} {{ v }} {% endfor %}
+
+- name: Crear el prune job
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} prune-job create {{ pbs_prune_job_id }} --store {{ pbs_datastore }} {{ _pbs_prune_args }}"
+  when: _pbs_prune_current == {}
+  changed_when: true
+
+- name: Actualizar el prune job si difiere
+  vars:
+    _pbs_prune_stale: "{{ _pbs_prune_actual.keys() | select('match', '^keep-') | reject('in', _pbs_prune_keep.keys()) | list }}"
+  ansible.builtin.command:
+    cmd: >-
+      {{ _pbs_mgr }} prune-job update {{ pbs_prune_job_id }} {{ _pbs_prune_args }}
+      {% for k in _pbs_prune_stale %}--delete {{ k }} {% endfor %}
+  when:
+    - _pbs_prune_current != {}
+    - _pbs_prune_actual != _pbs_prune_desired
+  changed_when: true
+
+# --- Verify job --------------------------------------------------------------
+
+- name: Listar verify jobs
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} verify-job list --output-format json"
+  register: _pbs_verify_list
+  changed_when: false
+
+- name: Calcular estado deseado y actual del verify job
+  ansible.builtin.set_fact:
+    _pbs_verify_current: >-
+      {{ _pbs_verify_list.stdout | from_json
+         | selectattr('id', 'equalto', pbs_verify_job_id) | first | default({}) }}
+    _pbs_verify_args: >-
+      --schedule '{{ pbs_verify_schedule }}'
+      --ignore-verified {{ pbs_verify_ignore_verified | bool | lower }}
+      {% if pbs_verify_outdated_after | int > 0 %}--outdated-after {{ pbs_verify_outdated_after }}{% endif %}
+
+# El list omite los campos en su default (ignore-verified=true, sin
+# outdated-after): se normaliza antes de comparar para no dar changed siempre.
+- name: Normalizar el verify job actual
+  ansible.builtin.set_fact:
+    _pbs_verify_differs: >-
+      {{ _pbs_verify_current.get('schedule') != pbs_verify_schedule
+         or (_pbs_verify_current.get('ignore-verified', true) | bool) != (pbs_verify_ignore_verified | bool)
+         or (_pbs_verify_current.get('outdated-after', 0) | int) != (pbs_verify_outdated_after | int) }}
+
+- name: Crear el verify job
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} verify-job create {{ pbs_verify_job_id }} --store {{ pbs_datastore }} {{ _pbs_verify_args }}"
+  when: _pbs_verify_current == {}
+  changed_when: true
+
+- name: Actualizar el verify job si difiere
+  ansible.builtin.command:
+    cmd: >-
+      {{ _pbs_mgr }} verify-job update {{ pbs_verify_job_id }} {{ _pbs_verify_args }}
+      {% if pbs_verify_outdated_after | int == 0 and 'outdated-after' in _pbs_verify_current %}--delete outdated-after{% endif %}
+  when:
+    - _pbs_verify_current != {}
+    - _pbs_verify_differs | bool
+  changed_when: true

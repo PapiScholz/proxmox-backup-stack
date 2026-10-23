@@ -1,0 +1,461 @@
+---
+# CT watchdog con dashboard HTML de backups.
+#
+# Corre en dashboard_node: crea el CT con `pct create`, le instala python3 +
+# nginx y el colector de dashboard/ (la misma fuente que usa el bootstrap), y
+# le genera tokens read-only. El lado PBS (usuario, token, ACL, cert) va
+# delegado a pbs_host_node, que es donde `pct exec` llega al CT del PBS.
+
+- name: Correr solo en el nodo del dashboard
+  ansible.builtin.meta: end_host
+  when: inventory_hostname != dashboard_node
+
+- name: Calcular nombres
+  ansible.builtin.set_fact:
+    _dash_exec: "pct exec {{ dashboard_ct_id }} --"
+    _dash_pbs_mgr: "pct exec {{ pbs_ct_id }} -- proxmox-backup-manager"
+    _dash_pve_tokenid: "{{ dashboard_pve_user }}!{{ dashboard_token_name }}"
+    _dash_pbs_tokenid: "{{ dashboard_pbs_user }}!{{ dashboard_token_name }}"
+    _dash_tpl_storage: "{{ dashboard_ostemplate.split(':')[0] }}"
+    _dash_tpl_file: "{{ dashboard_ostemplate.split('/') | last }}"
+    _dash_net0: >-
+      name=eth0,bridge={{ dashboard_bridge }},ip={{ dashboard_ip_cidr }}{{
+      '' if dashboard_ip_cidr == 'dhcp' else ',gw=' ~ dashboard_gateway }}
+
+# --- CT ----------------------------------------------------------------------
+
+- name: Ver si el CT ya existe
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "pct config {{ dashboard_ct_id }}"
+  register: _dash_ct_config
+  changed_when: false
+  failed_when: false
+
+- name: No adueñarse de un CT ajeno con el mismo id
+  ansible.builtin.assert:
+    that: >-
+      _dash_ct_config.rc != 0
+      or ('hostname: ' ~ dashboard_hostname) in _dash_ct_config.stdout_lines
+    fail_msg: >-
+      El CT {{ dashboard_ct_id }} ya existe y su hostname no es
+      {{ dashboard_hostname }}. Elegi otro dashboard_ct_id.
+    quiet: true
+
+- name: Listar templates disponibles
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "pveam list {{ _dash_tpl_storage }}"
+  register: _dash_templates
+  changed_when: false
+  when: _dash_ct_config.rc != 0
+
+- name: Descargar el template del CT
+  ansible.builtin.shell:
+    cmd: "set -o pipefail && pveam update >/dev/null && pveam download {{ _dash_tpl_storage }} {{ _dash_tpl_file }}"
+    executable: /bin/bash
+  when:
+    - _dash_ct_config.rc != 0
+    - dashboard_ostemplate not in _dash_templates.stdout
+  changed_when: true
+
+# nesting=1: con Debian 13 (systemd 257) sin nesting fallan tmp.mount,
+# run-lock.mount y dev-mqueue.mount dentro del CT.
+- name: Crear el CT del dashboard
+  ansible.builtin.command:
+    argv:
+      - pct
+      - create
+      - "{{ dashboard_ct_id }}"
+      - "{{ dashboard_ostemplate }}"
+      - --hostname
+      - "{{ dashboard_hostname }}"
+      - --unprivileged
+      - "1"
+      - --features
+      - nesting=1
+      - --cores
+      - "{{ dashboard_cores | string }}"
+      - --memory
+      - "{{ dashboard_memory_mb | string }}"
+      - --swap
+      - "{{ dashboard_swap_mb | string }}"
+      - --rootfs
+      - "{{ dashboard_rootfs_storage }}:{{ dashboard_disk_gb }}"
+      - --net0
+      - "{{ _dash_net0 }}"
+      - --onboot
+      - "1"
+      - --description
+      - "Dashboard de backups (proxmox-backup-stack)"
+  when: _dash_ct_config.rc != 0
+  changed_when: true
+
+- name: Ver si el CT esta corriendo
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "pct status {{ dashboard_ct_id }}"
+  register: _dash_ct_status
+  changed_when: false
+  failed_when: false
+
+- name: Arrancar el CT
+  ansible.builtin.command:
+    cmd: "pct start {{ dashboard_ct_id }}"
+  when: "'running' not in _dash_ct_status.stdout"
+  changed_when: true
+
+# En check mode el CT puede no existir todavia: lo que sigue opera adentro.
+- name: Cortar aca en check mode si el CT no existe
+  ansible.builtin.meta: end_host
+  when: ansible_check_mode and _dash_ct_config.rc != 0
+
+- name: Esperar red y DNS en el CT
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _dash_exec }} getent hosts deb.debian.org"
+  register: _dash_dns
+  until: _dash_dns.rc == 0
+  retries: 20
+  delay: 3
+  changed_when: false
+
+- name: Ver paquetes instalados en el CT
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _dash_exec }} dpkg -s python3 nginx"
+  register: _dash_pkgs
+  changed_when: false
+  failed_when: false
+
+- name: Instalar python3 y nginx en el CT
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ dashboard_ct_id }}"
+      - --
+      - sh
+      - -c
+      - >-
+        export DEBIAN_FRONTEND=noninteractive
+        && apt-get update -qq
+        && apt-get install -y -qq --no-install-recommends python3 nginx
+  when: _dash_pkgs.rc != 0
+  changed_when: true
+  notify: Recargar dashboard
+
+# --- Tokens read-only: PVE ---------------------------------------------------
+
+- name: Listar usuarios de PVE
+  check_mode: false
+  ansible.builtin.command:
+    cmd: pveum user list --output-format json
+  register: _dash_pve_users
+  changed_when: false
+
+- name: Crear el usuario read-only de PVE
+  ansible.builtin.command:
+    cmd: "pveum user add {{ dashboard_pve_user }} --comment 'Dashboard de backups (read-only)'"
+  when: dashboard_pve_user not in (_dash_pve_users.stdout | from_json | map(attribute='userid') | list)
+  changed_when: true
+
+- name: Listar ACLs de PVE
+  check_mode: false
+  ansible.builtin.command:
+    cmd: pveum acl list --output-format json
+  register: _dash_pve_acls
+  changed_when: false
+
+- name: Ver tokens del usuario de PVE
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "pveum user token list {{ dashboard_pve_user }} --output-format json"
+  register: _dash_pve_tokens
+  changed_when: false
+  failed_when: _dash_pve_tokens.rc != 0 and not ansible_check_mode
+
+- name: Ver si el CT ya tiene el secreto de PVE
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _dash_exec }} grep -q '^PVE_TOKEN_SECRET=.' /etc/backup-dashboard/pve-token.env"
+  register: _dash_pve_secret
+  changed_when: false
+  failed_when: false
+
+- name: Decidir si hay que (re)generar el token de PVE
+  ansible.builtin.set_fact:
+    _dash_pve_token_exists: >-
+      {{ dashboard_token_name in (_dash_pve_tokens.stdout | default('[]', true) | from_json
+         | map(attribute='tokenid') | list) }}
+    _dash_pve_token_needed: >-
+      {{ dashboard_regenerate_tokens | bool or _dash_pve_secret.rc != 0
+         or dashboard_token_name not in (_dash_pve_tokens.stdout | default('[]', true) | from_json
+         | map(attribute='tokenid') | list) }}
+
+- name: Borrar el token de PVE para regenerarlo
+  ansible.builtin.command:
+    cmd: "pveum user token remove {{ dashboard_pve_user }} {{ dashboard_token_name }}"
+  when: _dash_pve_token_needed | bool and _dash_pve_token_exists | bool
+  changed_when: true
+
+- name: Generar el token de PVE (privsep)
+  ansible.builtin.command:
+    cmd: >-
+      pveum user token add {{ dashboard_pve_user }} {{ dashboard_token_name }}
+      --privsep 1 --comment 'Dashboard de backups' --output-format json
+  register: _dash_pve_token_new
+  when: _dash_pve_token_needed | bool
+  changed_when: true
+  no_log: true
+
+# Con privsep el permiso efectivo es usuario ∩ token: el rol va a los dos.
+- name: Dar PVEAuditor al usuario y al token
+  ansible.builtin.command:
+    cmd: "pveum acl modify / --roles PVEAuditor --{{ item.kind }} '{{ item.id }}'"
+  loop:
+    - { kind: users, id: "{{ dashboard_pve_user }}" }
+    - { kind: tokens, id: "{{ _dash_pve_tokenid }}" }
+  when: >-
+    _dash_pve_acls.stdout | from_json
+    | selectattr('path', 'equalto', '/')
+    | selectattr('roleid', 'equalto', 'PVEAuditor')
+    | selectattr('ugid', 'equalto', item.id)
+    | list | length == 0
+  changed_when: true
+
+- name: Guardar el secreto de PVE en el CT
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ dashboard_ct_id }}"
+      - --
+      - sh
+      - -c
+      - umask 077 && mkdir -p /etc/backup-dashboard && cat > /etc/backup-dashboard/pve-token.env
+    stdin: "PVE_TOKEN_SECRET={{ (_dash_pve_token_new.stdout | default('{}', true) | from_json).value | default('') }}"
+  when: _dash_pve_token_needed | bool
+  changed_when: true
+  no_log: true
+  notify: Recargar dashboard
+
+# --- Tokens read-only: PBS (delegado al nodo del PBS) ------------------------
+
+- name: Listar usuarios del PBS
+  check_mode: false
+  delegate_to: "{{ pbs_host_node }}"
+  ansible.builtin.command:
+    cmd: "{{ _dash_pbs_mgr }} user list --output-format json"
+  register: _dash_pbs_users
+  changed_when: false
+
+- name: Crear el usuario read-only del PBS
+  delegate_to: "{{ pbs_host_node }}"
+  ansible.builtin.command:
+    cmd: "{{ _dash_pbs_mgr }} user create {{ dashboard_pbs_user }} --comment 'Dashboard de backups (read-only)'"
+  when: dashboard_pbs_user not in (_dash_pbs_users.stdout | from_json | map(attribute='userid') | list)
+  changed_when: true
+
+- name: Ver tokens del usuario del PBS
+  check_mode: false
+  delegate_to: "{{ pbs_host_node }}"
+  ansible.builtin.command:
+    cmd: "{{ _dash_pbs_mgr }} user list-tokens {{ dashboard_pbs_user }} --output-format json"
+  register: _dash_pbs_tokens
+  changed_when: false
+  failed_when: _dash_pbs_tokens.rc != 0 and not ansible_check_mode
+
+- name: Ver si el CT ya tiene el secreto del PBS
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _dash_exec }} grep -q '^PBS_TOKEN_SECRET=.' /etc/backup-dashboard/pbs-token.env"
+  register: _dash_pbs_secret
+  changed_when: false
+  failed_when: false
+
+- name: Decidir si hay que (re)generar el token del PBS
+  ansible.builtin.set_fact:
+    _dash_pbs_token_exists: >-
+      {{ _dash_pbs_tokenid in (_dash_pbs_tokens.stdout | default('[]', true) | from_json
+         | map(attribute='tokenid') | list) }}
+    _dash_pbs_token_needed: >-
+      {{ dashboard_regenerate_tokens | bool or _dash_pbs_secret.rc != 0
+         or _dash_pbs_tokenid not in (_dash_pbs_tokens.stdout | default('[]', true) | from_json
+         | map(attribute='tokenid') | list) }}
+
+- name: Borrar el token del PBS para regenerarlo
+  delegate_to: "{{ pbs_host_node }}"
+  ansible.builtin.command:
+    cmd: "{{ _dash_pbs_mgr }} user delete-token {{ dashboard_pbs_user }} {{ dashboard_token_name }}"
+  when: _dash_pbs_token_needed | bool and _dash_pbs_token_exists | bool
+  changed_when: true
+
+- name: Generar el token del PBS
+  delegate_to: "{{ pbs_host_node }}"
+  ansible.builtin.command:
+    # generate-token no acepta --output-format: imprime "Result: {json}".
+    cmd: "{{ _dash_pbs_mgr }} user generate-token {{ dashboard_pbs_user }} {{ dashboard_token_name }}"
+  register: _dash_pbs_token_new
+  when: _dash_pbs_token_needed | bool
+  changed_when: true
+  no_log: true
+
+- name: Listar ACLs del PBS
+  check_mode: false
+  delegate_to: "{{ pbs_host_node }}"
+  ansible.builtin.command:
+    cmd: "{{ _dash_pbs_mgr }} acl list --output-format json"
+  register: _dash_pbs_acls
+  changed_when: false
+
+- name: Dar DatastoreAudit al usuario y al token
+  delegate_to: "{{ pbs_host_node }}"
+  ansible.builtin.command:
+    cmd: "{{ _dash_pbs_mgr }} acl update /datastore/{{ dashboard_pbs_store }} DatastoreAudit --auth-id '{{ item }}'"
+  loop:
+    - "{{ dashboard_pbs_user }}"
+    - "{{ _dash_pbs_tokenid }}"
+  when: >-
+    _dash_pbs_acls.stdout | from_json
+    | selectattr('path', 'equalto', '/datastore/' ~ dashboard_pbs_store)
+    | selectattr('roleid', 'equalto', 'DatastoreAudit')
+    | selectattr('ugid', 'equalto', item)
+    | list | length == 0
+  changed_when: true
+
+- name: Guardar el secreto del PBS en el CT
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ dashboard_ct_id }}"
+      - --
+      - sh
+      - -c
+      - umask 077 && mkdir -p /etc/backup-dashboard && cat > /etc/backup-dashboard/pbs-token.env
+    stdin: "PBS_TOKEN_SECRET={{ (_dash_pbs_token_new.stdout | default('{}', true) | regex_replace('^[^{]*', '') | from_json).value | default('') }}"
+  when: _dash_pbs_token_needed | bool
+  changed_when: true
+  no_log: true
+  notify: Recargar dashboard
+
+# --- Archivos del dashboard --------------------------------------------------
+
+- name: Crear staging en el nodo
+  ansible.builtin.file:
+    path: "{{ dashboard_staging_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Leer el cert del PBS (publico) para validar TLS
+  check_mode: false
+  delegate_to: "{{ pbs_host_node }}"
+  ansible.builtin.command:
+    cmd: "pct exec {{ pbs_ct_id }} -- cat /etc/proxmox-backup/proxy.pem"
+  register: _dash_pbs_cert
+  changed_when: false
+  when: dashboard_verify_with_ca | bool
+
+- name: Preparar archivos en el staging
+  ansible.builtin.copy:
+    src: "{{ item.src | default(omit) }}"
+    content: "{{ item.content | default(omit) }}"
+    remote_src: "{{ item.remote_src | default(false) }}"
+    dest: "{{ dashboard_staging_dir }}/{{ item.name }}"
+    mode: "0600"
+  loop: >-
+    {{ [
+         {'name': 'collector.py', 'src': dashboard_src_dir ~ '/collector.py',
+          'dest': '/opt/backup-dashboard/collector.py', 'perms': '0755'},
+         {'name': 'backup-dashboard.service', 'src': dashboard_src_dir ~ '/backup-dashboard.service',
+          'dest': '/etc/systemd/system/backup-dashboard.service', 'perms': '0644'},
+         {'name': 'backup-dashboard.timer', 'src': dashboard_src_dir ~ '/backup-dashboard.timer',
+          'dest': '/etc/systemd/system/backup-dashboard.timer', 'perms': '0644'},
+         {'name': 'interval.conf', 'content': lookup('ansible.builtin.template', 'interval.conf.j2'),
+          'dest': '/etc/systemd/system/backup-dashboard.timer.d/interval.conf', 'perms': '0644'},
+         {'name': 'dashboard.env', 'content': lookup('ansible.builtin.template', 'dashboard.env.j2'),
+          'dest': '/etc/backup-dashboard/dashboard.env', 'perms': '0600'}
+       ] + ([
+         {'name': 'pve-root-ca.pem', 'src': '/etc/pve/pve-root-ca.pem', 'remote_src': true,
+          'dest': '/etc/backup-dashboard/pve-root-ca.pem', 'perms': '0644'},
+         {'name': 'pbs-proxy.pem', 'content': _dash_pbs_cert.stdout,
+          'dest': '/etc/backup-dashboard/pbs-proxy.pem', 'perms': '0644'}
+       ] if dashboard_verify_with_ca | bool else []) }}
+  loop_control:
+    label: "{{ item.name }}"
+  register: _dash_staged
+
+- name: Leer checksums instalados en el CT
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _dash_exec }} sha1sum {{ item.item.dest }}"
+  loop: "{{ _dash_staged.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  register: _dash_installed
+  changed_when: false
+  failed_when: false
+
+- name: Crear directorios en el CT
+  ansible.builtin.command:
+    cmd: "{{ _dash_exec }} mkdir -p /opt/backup-dashboard /etc/backup-dashboard /etc/systemd/system/backup-dashboard.timer.d"
+  changed_when: false
+
+- name: Instalar en el CT los archivos que cambiaron
+  ansible.builtin.command:
+    argv:
+      - pct
+      - push
+      - "{{ dashboard_ct_id }}"
+      - "{{ dashboard_staging_dir }}/{{ item.0.item.name }}"
+      - "{{ item.0.item.dest }}"
+      - --perms
+      - "{{ item.0.item.perms }}"
+  loop: "{{ _dash_staged.results | zip(_dash_installed.results) | list }}"
+  loop_control:
+    label: "{{ item.0.item.name }}"
+  # En check mode copy no siempre devuelve checksum: el default evita romper.
+  when: (item.1.stdout | default('')).split(' ')[0] != item.0.checksum | default('')
+  changed_when: true
+  notify: Recargar dashboard
+
+- name: Ver si el timer esta habilitado
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _dash_exec }} systemctl is-enabled backup-dashboard.timer"
+  register: _dash_timer_enabled
+  changed_when: _dash_timer_enabled.rc != 0
+  failed_when: false
+  notify: Recargar dashboard
+
+- name: Aplicar cambios pendientes en el CT
+  ansible.builtin.meta: flush_handlers
+
+# --- Verificacion ------------------------------------------------------------
+
+- name: Leer la IP del CT
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _dash_exec }} hostname -I"
+  register: _dash_ip
+  changed_when: false
+
+- name: Verificar que el dashboard responde
+  ansible.builtin.uri:
+    url: "http://{{ _dash_ip.stdout.split() | first }}/"
+    return_content: true
+  register: _dash_http
+  until: _dash_http.status == 200 and 'Backups Proxmox' in _dash_http.content
+  retries: 10
+  delay: 3
+  when: not ansible_check_mode
+
+- name: Avisar si el colector reporta errores
+  ansible.builtin.debug:
+    msg: >-
+      Dashboard en http://{{ _dash_ip.stdout.split() | first }}/ responde, pero con
+      errores: {{ _dash_http.content | regex_findall("<div class='banner'>([^<]*)") | join(' | ') }}
+  when:
+    - not ansible_check_mode
+    - "\"class='banner'\" in _dash_http.content"

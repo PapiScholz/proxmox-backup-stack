@@ -1,0 +1,220 @@
+---
+# Storage tipo pbs en el cluster PVE, con usuario + token propios en el PBS.
+#
+# Corre en el nodo que aloja el CT del PBS: el lado PBS va por `pct exec` y el
+# lado PVE por `pvesm`/`pvesh` (storage.cfg es de todo el cluster, alcanza con
+# un nodo).
+#
+# Privilege separation: el permiso efectivo de un token PBS es la interseccion
+# usuario ∩ token, asi que el rol de datastore se da a los dos.
+
+- name: Correr solo en el nodo que aloja el PBS
+  ansible.builtin.meta: end_host
+  when: inventory_hostname != pbs_host_node
+
+- name: Calcular nombres
+  ansible.builtin.set_fact:
+    _pbs_mgr: "pct exec {{ pbs_ct_id }} -- proxmox-backup-manager"
+    _pbs_tokenid: "{{ pbs_backup_user }}!{{ pbs_backup_token_name }}"
+    _pbs_acl_path: "/datastore/{{ pbs_datastore }}"
+
+# --- Estado actual -----------------------------------------------------------
+
+- name: Leer storages del cluster
+  check_mode: false
+  ansible.builtin.command:
+    cmd: pvesh get /storage --output-format json
+  register: _pve_storages
+  changed_when: false
+
+- name: Extraer el storage PBS actual
+  ansible.builtin.set_fact:
+    _pve_storage: >-
+      {{ _pve_storages.stdout | from_json
+         | selectattr('storage', 'equalto', pve_pbs_storage_name) | first | default({}) }}
+
+- name: No reutilizar un storage con otro tipo o usuario
+  ansible.builtin.assert:
+    that:
+      - _pve_storage == {} or _pve_storage.type == 'pbs'
+      - _pve_storage == {} or _pve_storage.username | default('') == _pbs_tokenid
+    fail_msg: >-
+      El storage {{ pve_pbs_storage_name }} ya existe con tipo
+      {{ _pve_storage.type | default('?') }} y usuario
+      {{ _pve_storage.username | default('?') }}; se esperaba pbs y
+      {{ _pbs_tokenid }}. Cambia pve_pbs_storage_name o ajusta el storage a mano.
+    quiet: true
+
+- name: Listar usuarios del PBS
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} user list --output-format json"
+  register: _pbs_users
+  changed_when: false
+
+- name: Crear el usuario del PBS
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} user create {{ pbs_backup_user }} --comment 'PVE -> PBS (proxmox-backup-stack)'"
+  when: pbs_backup_user not in (_pbs_users.stdout | from_json | map(attribute='userid') | list)
+  changed_when: true
+
+- name: Listar tokens del usuario
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} user list-tokens {{ pbs_backup_user }} --output-format json"
+  register: _pbs_tokens
+  changed_when: false
+  # Si el usuario se acaba de crear en check mode, no existe todavia.
+  failed_when: _pbs_tokens.rc != 0 and not ansible_check_mode
+
+- name: Decidir que hacer con el token
+  ansible.builtin.set_fact:
+    _pbs_token_exists: "{{ _pbs_tokenid in (_pbs_tokens.stdout | default('[]', true) | from_json | map(attribute='tokenid') | list) }}"
+    _pve_storage_exists: "{{ _pve_storage != {} }}"
+
+# Token existente sin storage = el secreto ya no se puede leer.
+- name: Fallar si hace falta el secreto de un token existente
+  ansible.builtin.fail:
+    msg: >-
+      El token {{ _pbs_tokenid }} ya existe pero el storage
+      {{ pve_pbs_storage_name }} no: su secreto solo se vio al crearlo. Corre con
+      -e pbs_regenerate_token=true para regenerarlo (invalida el anterior).
+  when:
+    - _pbs_token_exists | bool
+    - not _pve_storage_exists | bool
+    - not pbs_regenerate_token | bool
+
+- name: Borrar el token para regenerarlo
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} user delete-token {{ pbs_backup_user }} {{ pbs_backup_token_name }}"
+  when:
+    - _pbs_token_exists | bool
+    - pbs_regenerate_token | bool
+  changed_when: true
+
+- name: Generar el token
+  ansible.builtin.command:
+    # generate-token no acepta --output-format: imprime "Result: {json}".
+    cmd: "{{ _pbs_mgr }} user generate-token {{ pbs_backup_user }} {{ pbs_backup_token_name }}"
+  register: _pbs_token_new
+  when: not (_pbs_token_exists | bool) or pbs_regenerate_token | bool
+  changed_when: true
+  no_log: true
+
+- name: Guardar el secreto del token nuevo
+  ansible.builtin.set_fact:
+    _pbs_token_secret: "{{ (_pbs_token_new.stdout | default('{}', true) | regex_replace('^[^{]*', '') | from_json).value | default('') }}"
+  no_log: true
+
+- name: Validar que el PBS devolvio el secreto
+  ansible.builtin.assert:
+    that: _pbs_token_secret | length > 0
+    fail_msg: "generate-token no devolvio el campo value; revisar la version del PBS."
+    quiet: true
+  when: _pbs_token_new is changed and not ansible_check_mode
+
+# --- ACL: usuario y token ----------------------------------------------------
+
+- name: Listar ACLs del PBS
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} acl list --output-format json"
+  register: _pbs_acls
+  changed_when: false
+
+- name: Dar el rol de datastore al usuario y al token
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} acl update {{ _pbs_acl_path }} {{ pbs_backup_role }} --auth-id '{{ item }}'"
+  loop:
+    - "{{ pbs_backup_user }}"
+    - "{{ _pbs_tokenid }}"
+  when: >-
+    _pbs_acls.stdout | from_json
+    | selectattr('path', 'equalto', _pbs_acl_path)
+    | selectattr('roleid', 'equalto', pbs_backup_role)
+    | selectattr('ugid', 'equalto', item)
+    | list | length == 0
+  changed_when: true
+
+# --- Fingerprint -------------------------------------------------------------
+
+- name: Leer el fingerprint del cert del PBS
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "{{ _pbs_mgr }} cert info"
+  register: _pbs_cert
+  changed_when: false
+  when: pbs_fingerprint | length == 0
+
+- name: Fijar el fingerprint esperado
+  ansible.builtin.set_fact:
+    _pbs_fp: >-
+      {{ pbs_fingerprint if pbs_fingerprint | length > 0
+         else (_pbs_cert.stdout | regex_search('Fingerprint \(sha256\): *([0-9A-Fa-f:]+)', '\1') | first) }}
+
+# --- Storage en el cluster ---------------------------------------------------
+
+- name: Crear el storage PBS
+  ansible.builtin.command:
+    argv:
+      - pvesm
+      - add
+      - pbs
+      - "{{ pve_pbs_storage_name }}"
+      - --server
+      - "{{ pbs_server }}"
+      - --port
+      - "{{ pbs_port | string }}"
+      - --datastore
+      - "{{ pbs_datastore }}"
+      - --username
+      - "{{ _pbs_tokenid }}"
+      - --password
+      - "{{ _pbs_token_secret }}"
+      - --fingerprint
+      - "{{ _pbs_fp }}"
+      - --content
+      - backup
+  when: not _pve_storage_exists | bool
+  changed_when: true
+  no_log: true
+
+- name: Actualizar el secreto del storage si se regenero el token
+  ansible.builtin.command:
+    argv: [pvesm, set, "{{ pve_pbs_storage_name }}", --password, "{{ _pbs_token_secret }}"]
+  when:
+    - _pve_storage_exists | bool
+    - _pbs_token_new is changed
+  changed_when: true
+  no_log: true
+
+- name: Alinear server, datastore y fingerprint del storage
+  ansible.builtin.command:
+    argv:
+      - pvesm
+      - set
+      - "{{ pve_pbs_storage_name }}"
+      - --server
+      - "{{ pbs_server }}"
+      - --datastore
+      - "{{ pbs_datastore }}"
+      - --fingerprint
+      - "{{ _pbs_fp }}"
+  when:
+    - _pve_storage_exists | bool
+    - >-
+      _pve_storage.server | default('') != pbs_server
+      or _pve_storage.datastore | default('') != pbs_datastore
+      or (_pve_storage.fingerprint | default('') | lower) != (_pbs_fp | lower)
+  changed_when: true
+
+- name: Esperar a que el storage quede activo
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "pvesm status --storage {{ pve_pbs_storage_name }}"
+  register: _pve_storage_status
+  until: _pve_storage_status.stdout is search(pve_pbs_storage_name ~ '\s+pbs\s+active')
+  retries: 6
+  delay: 5
+  changed_when: false
+  when: not ansible_check_mode or _pve_storage_exists | bool

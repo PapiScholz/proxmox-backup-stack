@@ -1,0 +1,19 @@
+[Unit]
+Description=Colector del dashboard de backups Proxmox
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Config y tokens read-only: archivos 0600 de root, solo existen en este CT.
+# El bootstrap pone todo en dashboard.env; el rol de Ansible deja los secretos
+# en archivos aparte (opcionales: el "-" ignora si no existen) para poder
+# re-renderizar la config sin regenerar tokens.
+EnvironmentFile=/etc/backup-dashboard/dashboard.env
+EnvironmentFile=-/etc/backup-dashboard/pve-token.env
+EnvironmentFile=-/etc/backup-dashboard/pbs-token.env
+ExecStart=/usr/bin/python3 /opt/backup-dashboard/collector.py
+# Sin ProtectSystem/PrivateTmp: en un CT unprivileged sin nesting fallan con
+# 226/NAMESPACE. Se deja el endurecimiento que no requiere namespaces.
+NoNewPrivileges=yes
+UMask=0022

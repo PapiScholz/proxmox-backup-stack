@@ -1,0 +1,20 @@
+---
+# Defaults del rol. Los valores reales van en group_vars/all.yml.
+
+pbs_host_node: pve1
+pbs_ct_id: 100
+pbs_server: 192.0.2.20
+pbs_port: 8007
+pbs_datastore: backups
+
+pve_pbs_storage_name: pbs
+pbs_backup_user: pve-backup@pbs
+pbs_backup_token_name: pve
+pbs_backup_role: DatastoreAdmin
+# Vacio = se lee del cert del PBS en cada corrida.
+pbs_fingerprint: ""
+
+# El secreto de un token solo se ve al crearlo. Si el token ya existe pero el
+# storage no (o al reves), recuperarlo exige regenerarlo: el rol solo lo hace
+# con este flag en true, porque invalida el secreto anterior.
+pbs_regenerate_token: false

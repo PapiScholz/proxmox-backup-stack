@@ -1,0 +1,17 @@
+---
+# Defaults del rol. Los valores reales van en group_vars/all.yml.
+
+pbs_host_node: pve1
+pve_pbs_storage_name: pbs
+
+# Id estable del job en /cluster/backup (formato pve-configid: empieza con
+# letra, [a-z0-9_-]). Para adoptar un job existente, poner aca su id.
+pve_backup_job_id: backup-stack-all
+pve_backup_schedule: "23:00"
+pve_backup_mode: snapshot
+pve_backup_exclude: []
+# auto | legacy-sendmail | notification-system (mailto/mailnotification estan
+# deprecados desde PVE 8.1: los avisos van por notification targets/matchers).
+pve_backup_notification_mode: auto
+# !unsafe: {{guestname}} es sintaxis de PVE, no de Jinja.
+pve_backup_notes_template: !unsafe "{{guestname}}"

@@ -1,0 +1,45 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ansible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar ansible-core y ansible-lint
+        run: pip install "ansible-core==2.17.*" "ansible-lint==24.12.2"
+
+      # syntax-check necesita inventario y variables: se usan los examples.
+      - name: Syntax check
+        run: |
+          cp inventory.example.ini inventory.ini
+          cp group_vars/all.example.yml group_vars/all.yml
+          ansible-playbook -i inventory.ini site.yml --syntax-check
+
+      - name: ansible-lint
+        run: ansible-lint
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+      - name: bash -n
+        run: for f in scripts/*.sh; do bash -n "$f"; done
+
+      - name: Compilar el colector
+        run: python3 -m py_compile dashboard/collector.py

@@ -1,0 +1,45 @@
+---
+# Defaults del rol. Los valores reales van en group_vars/all.yml (ver
+# group_vars/all.example.yml, que documenta cada uno).
+
+pbs_host_node: pve1
+pbs_ct_id: 100
+
+nas_nfs_server: 192.0.2.50
+nas_nfs_export: /export/pbs
+nas_mount_point: /mnt/pbs-nfs
+nas_mount_opts: "rw,hard,vers=4.1,noatime,_netdev"
+
+pbs_ct_mp_index: 0
+pbs_ct_mount_point: /mnt/datastore
+
+pbs_idmap_offset: 100000
+pbs_backup_uid: 34
+pbs_backup_gid: 34
+
+pbs_datastore: backups
+pbs_datastore_path: "{{ pbs_ct_mount_point }}/{{ pbs_datastore }}"
+pbs_datastore_dir_mode: "0750"
+# Crear el chunkstore (65536 dirs) sobre NFS es lento por la metadata: en un NAS
+# hogareno tarda 10-25 min. Segundos maximos antes de abortar.
+pbs_datastore_create_timeout: 3600
+
+pbs_prune_job_id: "prune-{{ pbs_datastore }}"
+pbs_prune_schedule: daily
+pbs_keep_last: 3
+pbs_keep_hourly: 0
+pbs_keep_daily: 7
+pbs_keep_weekly: 4
+pbs_keep_monthly: 6
+pbs_keep_yearly: 0
+
+pbs_gc_schedule: "sat 03:00"
+
+pbs_verify_job_id: "verify-{{ pbs_datastore }}"
+pbs_verify_schedule: "sun 04:00"
+pbs_verify_outdated_after: 30
+pbs_verify_ignore_verified: true
+
+# El bind-mount nuevo se aplica en caliente si PVE puede; si no, el CT del PBS
+# necesita reinicio. Por defecto el rol NO reinicia el PBS: falla y avisa.
+pbs_allow_ct_restart: false

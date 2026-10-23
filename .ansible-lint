@@ -1,0 +1,14 @@
+---
+profile: production
+
+skip_list:
+  # Las variables del stack se comparten entre roles a proposito (pbs_datastore,
+  # pbs_server, etc. las usan varios) y se definen una sola vez en
+  # group_vars/all.yml. Prefijarlas por rol obligaria a duplicarlas.
+  - var-naming[no-role-prefix]
+
+exclude_paths:
+  - .github/
+  - docs/
+  # Por si alguien instala colecciones junto al playbook.
+  - collections/

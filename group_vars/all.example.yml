@@ -1,0 +1,146 @@
+---
+# Variables del stack. Copiar a group_vars/all.yml (ignorado por git) y editar:
+#   cp group_vars/all.example.yml group_vars/all.yml
+#
+# Todos los valores son de ejemplo. IPs de documentacion (RFC 5737).
+# Ningun secreto va en este archivo: los tokens se generan en el despliegue y
+# quedan solo en los hosts que los usan.
+
+# --- Topologia ---------------------------------------------------------------
+
+# Nodo PVE (nombre de inventario) que aloja el CT del PBS. Ahi se monta el NFS.
+pbs_host_node: pve1
+# VMID del CT del PBS (unprivileged).
+pbs_ct_id: 100
+# Direccion por la que los nodos PVE llegan al PBS (puerto 8007).
+pbs_server: 192.0.2.20
+
+# --- NAS / NFS (role pbs_datastore_nas) --------------------------------------
+# El export NFS tiene que existir de antemano: este repo no configura el NAS.
+
+nas_nfs_server: 192.0.2.50
+nas_nfs_export: /export/pbs
+# Punto de montaje en el host PVE (pbs_host_node).
+nas_mount_point: /mnt/pbs-nfs
+nas_mount_opts: "rw,hard,vers=4.1,noatime,_netdev"
+
+# Bind-mount del NFS dentro del CT del PBS.
+pbs_ct_mp_index: 0                       # se escribe como mp0 en /etc/pve/lxc/<id>.conf
+pbs_ct_mount_point: /mnt/datastore
+
+# idmap: en un CT unprivileged el uid N del CT es el uid (offset + N) en el host.
+# El usuario "backup" del PBS es uid/gid 34, asi que el NFS tiene que pertenecer
+# a 100034:100034 visto desde el host.
+pbs_idmap_offset: 100000
+pbs_backup_uid: 34
+pbs_backup_gid: 34
+
+# --- Datastore PBS (role pbs_datastore_nas) ----------------------------------
+
+pbs_datastore: backups
+# Puede ser pbs_ct_mount_point mismo o un subdirectorio.
+pbs_datastore_path: "{{ pbs_ct_mount_point }}/{{ pbs_datastore }}"
+# Modo del directorio del datastore (dueno: el uid mapeado de backup).
+pbs_datastore_dir_mode: "0750"
+# Crear el chunkstore sobre NFS tarda 10-25 min (metadata lenta). Tope en segundos.
+pbs_datastore_create_timeout: 3600
+
+# Si el bind-mount nuevo no se aplica en caliente, el CT del PBS necesita
+# reinicio. false = el rol falla y avisa en vez de reiniciar el PBS.
+pbs_allow_ct_restart: false
+
+# Retencion: vive en el PBS (prune job), no en el job de PVE.
+# keep-* en 0 = no se usa.
+pbs_prune_job_id: "prune-{{ pbs_datastore }}"
+pbs_prune_schedule: daily
+pbs_keep_last: 3
+pbs_keep_hourly: 0
+pbs_keep_daily: 7
+pbs_keep_weekly: 4
+pbs_keep_monthly: 6
+pbs_keep_yearly: 0
+
+pbs_gc_schedule: "sat 03:00"
+pbs_verify_job_id: "verify-{{ pbs_datastore }}"
+pbs_verify_schedule: "sun 04:00"
+pbs_verify_outdated_after: 30            # dias; re-verifica snapshots mas viejos que esto
+pbs_verify_ignore_verified: true
+
+# --- Storage PBS en el cluster (role pve_pbs_storage) ------------------------
+
+pve_pbs_storage_name: pbs
+# Usuario y token del PBS con los que PVE escribe los backups. El valor del
+# token se genera en el despliegue y lo guarda PVE en /etc/pve/priv/; no va aca.
+pbs_backup_user: pve-backup@pbs
+pbs_backup_token_name: pve
+pbs_backup_role: DatastoreAdmin           # se da al usuario Y al token
+pbs_port: 8007
+# Fingerprint SHA-256 del cert del PBS. Vacio = se lee del PBS en el despliegue.
+pbs_fingerprint: ""
+# El secreto del token solo se ve al crearlo. Si el token existe y el storage
+# no, recuperarlo exige regenerarlo (invalida el anterior): solo con true.
+pbs_regenerate_token: false
+
+# --- Backup job (role pve_backup_job) ----------------------------------------
+
+# Id estable del job en /cluster/backup: es lo que hace idempotente la re-corrida.
+# Formato pve-configid (empieza con letra, [a-z0-9_-]). Si ya tenes un job --all
+# hacia este storage, el rol lo detecta y te pide poner aca su id para adoptarlo.
+pve_backup_job_id: backup-stack-all
+pve_backup_schedule: "23:00"
+pve_backup_mode: snapshot                # snapshot | suspend | stop
+# VMIDs a excluir del --all (p. ej. guests reproducibles o con discos passthrough
+# que vzdump no puede leer). Lista vacia = todos.
+pve_backup_exclude: []
+# Avisos: auto | legacy-sendmail | notification-system. mailto/mailnotification
+# estan deprecados desde PVE 8.1; configurar notification targets/matchers en PVE.
+pve_backup_notification_mode: auto
+# Nota de cada backup. !unsafe es obligatorio: {{guestname}} es sintaxis de PVE.
+pve_backup_notes_template: !unsafe "{{guestname}}"
+
+# --- Dashboard watchdog (role backup_dashboard / bootstrap) ------------------
+
+dashboard_ct_id: 150
+dashboard_hostname: backup-dashboard
+dashboard_node: pve1                     # nodo PVE donde se crea el CT
+# Si el template no esta en el storage, el rol lo baja con pveam.
+dashboard_ostemplate: "local:vztmpl/debian-13-standard_13.6-1_amd64.tar.zst"
+dashboard_rootfs_storage: local-lvm
+dashboard_disk_gb: 4
+dashboard_cores: 1
+dashboard_memory_mb: 256
+dashboard_swap_mb: 256
+dashboard_bridge: vmbr0
+# "dhcp" o IP en CIDR (con IP fija, dashboard_gateway es obligatorio).
+dashboard_ip_cidr: 192.0.2.30/24
+dashboard_gateway: 192.0.2.1
+
+# Nodo PVE al que consulta el colector y nombre del datastore.
+dashboard_pve_host: 192.0.2.11
+dashboard_pve_port: 8006
+dashboard_pbs_host: "{{ pbs_server }}"
+dashboard_pbs_port: "{{ pbs_port }}"
+dashboard_pbs_store: "{{ pbs_datastore }}"
+
+# Usuarios read-only del colector. Los tokens se generan en el despliegue y
+# quedan solo dentro del CT del dashboard.
+dashboard_pve_user: dashboard@pve        # rol PVEAuditor
+dashboard_pbs_user: dashboard@pbs        # rol DatastoreAudit
+dashboard_token_name: collector
+# Los tokens se generan una vez y su secreto queda solo en el CT. true = los
+# regenera en esta corrida (invalida los anteriores).
+dashboard_regenerate_tokens: false
+
+# Umbrales del estado por guest.
+dashboard_ok_hours: 26                   # ultimo backup mas nuevo que esto = OK
+dashboard_warn_days: 3                   # entre ok_hours y esto = atencion; mas = viejo
+dashboard_refresh_minutes: 5             # frecuencia del timer del colector
+
+# TLS del colector, de mas a menos estricto (por API):
+#   1. CA: el rol copia al CT /etc/pve/pve-root-ca.pem (PVE) y el proxy.pem del
+#      PBS (self-signed) y valida la cadena contra ellos.
+#   2. Fingerprint SHA-256 fijado aca.
+#   3. Nada: no verifica (solo en una LAN de confianza).
+dashboard_verify_with_ca: true
+dashboard_pve_fingerprint: ""
+dashboard_pbs_fingerprint: ""

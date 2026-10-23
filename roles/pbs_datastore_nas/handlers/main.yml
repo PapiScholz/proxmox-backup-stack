@@ -1,0 +1,15 @@
+---
+- name: Reiniciar CT del PBS
+  ansible.builtin.command:
+    cmd: "pct reboot {{ pbs_ct_id }}"
+  changed_when: true
+  notify: Esperar al PBS
+
+- name: Esperar al PBS
+  ansible.builtin.command:
+    cmd: "pct exec {{ pbs_ct_id }} -- systemctl is-active proxmox-backup-proxy"
+  register: pbs_proxy_state
+  until: pbs_proxy_state.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false

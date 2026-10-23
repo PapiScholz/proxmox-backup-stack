@@ -1,0 +1,48 @@
+---
+# Defaults del rol. Los valores reales van en group_vars/all.yml.
+
+pbs_host_node: pve1
+pbs_ct_id: 100
+pbs_server: 192.0.2.20
+pbs_port: 8007
+pbs_datastore: backups
+
+dashboard_ct_id: 150
+dashboard_hostname: backup-dashboard
+dashboard_node: pve1
+dashboard_ostemplate: "local:vztmpl/debian-13-standard_13.6-1_amd64.tar.zst"
+dashboard_rootfs_storage: local-lvm
+dashboard_disk_gb: 4
+dashboard_cores: 1
+dashboard_memory_mb: 256
+dashboard_swap_mb: 256
+dashboard_bridge: vmbr0
+# "dhcp" o una IP en CIDR. Con IP fija, dashboard_gateway es obligatorio.
+dashboard_ip_cidr: 192.0.2.30/24
+dashboard_gateway: 192.0.2.1
+
+dashboard_pve_host: 192.0.2.11
+dashboard_pve_port: 8006
+dashboard_pbs_host: "{{ pbs_server }}"
+dashboard_pbs_port: "{{ pbs_port }}"
+dashboard_pbs_store: "{{ pbs_datastore }}"
+
+dashboard_pve_user: dashboard@pve
+dashboard_pbs_user: dashboard@pbs
+dashboard_token_name: collector
+# Regenera los dos tokens aunque el CT ya tenga secretos (p. ej. si se
+# sospecha que se filtraron). Invalida los anteriores.
+dashboard_regenerate_tokens: false
+
+dashboard_ok_hours: 26
+dashboard_warn_days: 3
+dashboard_refresh_minutes: 5
+
+dashboard_verify_with_ca: true
+dashboard_pve_fingerprint: ""
+dashboard_pbs_fingerprint: ""
+
+# Fuente unica del dashboard (la misma que usa scripts/bootstrap-dashboard.sh).
+dashboard_src_dir: "{{ role_path }}/../../dashboard"
+# Staging en el nodo PVE antes de `pct push` al CT.
+dashboard_staging_dir: /var/lib/proxmox-backup-stack/dashboard
