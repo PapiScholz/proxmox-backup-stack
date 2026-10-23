@@ -31,7 +31,7 @@ garbage collection que libera los chunks huerfanos.
 | Rol / pieza | Corre en | Que deja |
 |---|---|---|
 | `pbs_datastore_nas` | `pbs_host_node` | NFS en fstab y montado, `mpN` en el CT del PBS, directorio del datastore con el uid mapeado, datastore, schedule de GC, prune job, verify job |
-| `pve_pbs_storage` | `pbs_host_node` | usuario + token en el PBS, `DatastoreAdmin` a los dos, storage `pbs` en el cluster con el fingerprint del PBS |
+| `pve_pbs_storage` | `pbs_host_node` | usuario + token en el PBS, `DatastoreBackup` a los dos, storage `pbs` en el cluster con el fingerprint del PBS |
 | `pve_backup_job` | `pbs_host_node` | job `/cluster/backup` `--all` con id estable |
 | `backup_dashboard` | `dashboard_node` | CT con nesting, python3 + nginx, colector + timer, tokens read-only en PVE y PBS |
 | `dashboard/` | dentro del CT | fuente unica del colector y sus units; la usan el rol y `scripts/bootstrap-dashboard.sh` |

@@ -71,6 +71,11 @@ El playbook lee el estado antes de tocar nada y adopta lo que ya existe:
   otro (duplicaria todos los backups): falla y te dice que id poner en
   `pve_backup_job_id` para adoptarlo.
 - **Storage PBS**: si ya existe con otro usuario, el rol falla en vez de pisarlo.
+- **ACLs**: el rol solo agrega los roles que necesita; nunca quita los que ya
+  hay. Si tu token ya tiene un rol más amplio (p. ej. `DatastoreAdmin`), sacalo a
+  mano en el PBS:
+  `proxmox-backup-manager acl update /datastore/<store> DatastoreAdmin --auth-id '<usuario>!<token>' --delete true`
+  (y lo mismo para `<usuario>`).
 - **Tokens**: el secreto de un token solo se ve al crearlo. Si el token existe
   pero el storage no, el rol se frena; `-e pbs_regenerate_token=true` lo regenera
   (invalida el anterior).
@@ -129,8 +134,11 @@ arriba en vez de quedar vacia. Se regenera cada `dashboard_refresh_minutes`.
   del storage queda en `/etc/pve/priv/` (lo guarda PVE) y los del dashboard solo
   dentro de su CT, en archivos `0600`. Ansible los maneja con `no_log`.
 - **Minimo privilegio.** El dashboard usa tokens con `privsep` y roles de solo
-  lectura (`PVEAuditor`, `DatastoreAudit`). El token del storage tiene
-  `DatastoreAdmin` solo sobre su datastore.
+  lectura (`PVEAuditor`, `DatastoreAudit`). El token del storage recibe
+  `DatastoreBackup` solo sobre su datastore: puede hacer backups y listar y
+  restaurar los propios, pero no borrarlos, porque la poda es tarea del PBS.
+  Con `pbs_backup_role: DatastorePowerUser` se pueden borrar backups desde la
+  GUI de PVE.
 - **TLS.** Por defecto el colector valida contra el CA del cluster
   (`/etc/pve/pve-root-ca.pem`) y el cert del PBS, que el rol copia al CT.
   Alternativa: fijar fingerprints SHA-256 (`dashboard_pve_fingerprint`,

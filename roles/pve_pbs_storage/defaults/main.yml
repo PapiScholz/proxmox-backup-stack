@@ -10,7 +10,11 @@ pbs_datastore: backups
 pve_pbs_storage_name: pbs
 pbs_backup_user: pve-backup@pbs
 pbs_backup_token_name: pve
-pbs_backup_role: DatastoreAdmin
+# Minimo privilegio: DatastoreBackup alcanza para que PVE haga backups, liste y
+# restaure los propios y vea el estado del storage. La retencion la hace el
+# prune job del PBS. DatastorePowerUser suma Datastore.Prune: solo hace falta
+# para borrar backups desde la GUI de PVE.
+pbs_backup_role: DatastoreBackup
 # Vacio = se lee del cert del PBS en cada corrida.
 pbs_fingerprint: ""
 

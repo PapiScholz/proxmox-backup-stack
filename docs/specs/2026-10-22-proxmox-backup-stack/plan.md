@@ -94,7 +94,7 @@ scaffolding (meta, ansible.cfg, inventory.example, group_vars.example)
 - [x] No hay ningún valor real/secreto en el árbol (grep de IPs del lab = 0)
 
 ### Phase 5: Publicación (deployment — requiere tu OK explícito)
-- [ ] Task 13: `git init` + commit inicial + crear repo público + `git push`
+- [x] Task 13: `git init` + commit inicial + crear repo público + `git push`
 
 ## Risks and Mitigations
 

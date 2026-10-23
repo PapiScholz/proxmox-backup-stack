@@ -15,7 +15,7 @@ maintained on a best-effort basis: expect a first answer within a few days.
 
 | Data | Classification | Where it is stored | Who can access it |
 |---|---|---|---|
-| Guest backups (VM/CT disks and configs) | Confidential (whatever the guests hold) | PBS datastore on the NAS export | root on the PVE host and PBS; the PVE storage token (`DatastoreAdmin` on that datastore) |
+| Guest backups (VM/CT disks and configs) | Confidential (whatever the guests hold) | PBS datastore on the NAS export | root on the PVE host and PBS; the PVE storage token (`DatastoreBackup` on that datastore: backs up, lists and restores its own backups, cannot delete) |
 | Guest names, VMIDs, nodes and backup timestamps | Internal | Rendered into the dashboard `index.html` | Anyone who can reach the dashboard container on port 80 (no authentication) |
 | Cluster topology (node IPs, NAS export, storage names) | Internal | Your `inventory.ini` and `group_vars/all.yml`, both git-ignored | Whoever runs the playbook |
 

@@ -75,6 +75,11 @@ already exists:
   fails and tells you which id to put in `pve_backup_job_id` to adopt it.
 - **PBS storage**: if it already exists with a different user, the role fails
   instead of overwriting it.
+- **ACLs**: the role only adds the roles it needs; it never removes existing
+  ones. If your token already has a broader role (e.g. `DatastoreAdmin`), drop it
+  by hand on the PBS:
+  `proxmox-backup-manager acl update /datastore/<store> DatastoreAdmin --auth-id '<user>!<token>' --delete true`
+  (and the same for `<user>`).
 - **Tokens**: a token secret is only shown when the token is created. If the
   token exists but the storage does not, the role stops;
   `-e pbs_regenerate_token=true` regenerates it (invalidating the old one).
@@ -135,8 +140,11 @@ banner at the top instead of staying empty. It is regenerated every
   one is kept by PVE in `/etc/pve/priv/`, and the dashboard ones only inside its
   container, in `0600` files. Ansible handles them with `no_log`.
 - **Least privilege.** The dashboard uses tokens with `privsep` and read-only
-  roles (`PVEAuditor`, `DatastoreAudit`). The storage token has
-  `DatastoreAdmin` on its datastore only.
+  roles (`PVEAuditor`, `DatastoreAudit`). The storage token gets
+  `DatastoreBackup` on its datastore only: it can back up, list and restore its
+  own backups, but not delete them, since pruning is the PBS's job. Set
+  `pbs_backup_role: DatastorePowerUser` if you want to delete backups from the
+  PVE GUI.
 - **TLS.** By default the collector validates against the cluster CA
   (`/etc/pve/pve-root-ca.pem`) and the PBS certificate, both copied into the
   container by the role. Alternative: pin SHA-256 fingerprints

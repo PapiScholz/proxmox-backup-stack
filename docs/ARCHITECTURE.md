@@ -31,7 +31,7 @@ garbage collection, which frees orphaned chunks.
 | Role / piece | Runs on | Leaves in place |
 |---|---|---|
 | `pbs_datastore_nas` | `pbs_host_node` | NFS in fstab and mounted, `mpN` on the PBS container, datastore directory owned by the mapped uid, datastore, GC schedule, prune job, verify job |
-| `pve_pbs_storage` | `pbs_host_node` | user + token on the PBS, `DatastoreAdmin` to both, `pbs` storage on the cluster with the PBS fingerprint |
+| `pve_pbs_storage` | `pbs_host_node` | user + token on the PBS, `DatastoreBackup` to both, `pbs` storage on the cluster with the PBS fingerprint |
 | `pve_backup_job` | `pbs_host_node` | `/cluster/backup` `--all` job with a stable id |
 | `backup_dashboard` | `dashboard_node` | container with nesting, python3 + nginx, collector + timer, read-only tokens on PVE and PBS |
 | `dashboard/` | inside the container | single source for the collector and its units; used by the role and by `scripts/bootstrap-dashboard.sh` |

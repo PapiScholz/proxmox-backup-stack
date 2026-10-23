@@ -47,6 +47,7 @@ Orden por dependencia. Cada task es S/M (<=5 archivos). `[ ]` abierta, `[x]` hec
 
 ## Task 6: Role pve_pbs_storage
 **Description:** `pvesm add pbs` en el cluster + usuario/token PBS + ACL **DatastoreAdmin al usuario Y al token** (privilege-separation).
+- 2026-10-23: default bajado a `DatastoreBackup` (hallazgo de security review). Segun el apidoc de PBS 4.2.8 alcanza para status, backup y listar/restaurar los propios; borrar desde PVE pide `Datastore.Prune` (`DatastorePowerUser`).
 **Acceptance:**
 - [x] Storage queda `active`; idempotente; ACL en ambos (user y token).
 - [x] `defaults/main.yml` con nombre storage, repo PBS, fingerprint, datastore.
@@ -104,6 +105,6 @@ Orden por dependencia. Cada task es S/M (<=5 archivos). `[ ]` abierta, `[x]` hec
 ## Task 13: Publicación [GATED — requiere "pusheá" explícito tuyo]
 **Description:** `git init`, commit inicial, crear repo público en tu GitHub (`gh repo create`), `git push`.
 **Acceptance:**
-- [ ] Repo público creado; push ok; CI corre.
+- [x] Repo público creado; push ok; CI corre. (2026-10-23: github.com/PapiScholz/proxmox-backup-stack, run 39896948351 verde)
 **Verify:** `gh repo view`; Actions en verde.
 **Dependencies:** 12 + autorización explícita. **Files:** (git). **Scope:** S

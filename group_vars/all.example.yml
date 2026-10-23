@@ -73,7 +73,10 @@ pve_pbs_storage_name: pbs
 # token se genera en el despliegue y lo guarda PVE en /etc/pve/priv/; no va aca.
 pbs_backup_user: pve-backup@pbs
 pbs_backup_token_name: pve
-pbs_backup_role: DatastoreAdmin           # se da al usuario Y al token
+# Rol del token de PVE sobre el datastore (se da al usuario Y al token).
+# DatastoreBackup: backup, listar/restaurar los propios y estado del storage.
+# DatastorePowerUser: lo mismo + borrar backups desde la GUI de PVE.
+pbs_backup_role: DatastoreBackup
 pbs_port: 8007
 # Fingerprint SHA-256 del cert del PBS. Vacio = se lee del PBS en el despliegue.
 pbs_fingerprint: ""
