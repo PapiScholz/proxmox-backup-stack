@@ -175,6 +175,7 @@ CI (`.github/workflows/lint.yml`) runs the same on every push and PR.
 - [Decisions (ADRs)](docs/adr/)
 - [Security](SECURITY.md)
 - [Dashboard sources](dashboard/README.md)
+- [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
 
 ## License
 

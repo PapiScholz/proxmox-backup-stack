@@ -167,6 +167,7 @@ El CI (`.github/workflows/lint.yml`) corre lo mismo en cada push y PR.
 - [Decisiones (ADRs, en inglés)](docs/adr/)
 - [Seguridad](SECURITY.es.md)
 - [Fuentes del dashboard](dashboard/README.md)
+- [Cómo contribuir](CONTRIBUTING.es.md) · [Código de conducta](CODE_OF_CONDUCT.es.md)
 
 ## Licencia
 
